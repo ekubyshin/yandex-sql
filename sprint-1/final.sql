@@ -13,7 +13,7 @@ create table raw_data.sales (
 	brand_origin VARCHAR(50) -- достаточно
 );
 
-COPY raw_data(id,auto,gasoline_consumption,price,date,person_name,phone,discount,brand_origin)
+COPY raw_data(id, auto, gasoline_consumption, price, date, person, phone, discount, brand_origin)
 FROM '/Path/To/File/cars.csv' WITH DELIMITER ',' CSV HEADER NULL 'null';
 
 -- исправляем баги в бд
@@ -63,7 +63,7 @@ INSERT INTO raw_data.splitted_sales(
 		sales.gasoline_consumption::NUMERIC(3,1) AS gasoline_consumption,
 		CASE
 			WHEN sales.discount < 1.0 THEN sales.price
-			ELSE sales.price * (100 + sales.discount::FLOAT) / 100.0
+			ELSE sales.price * 100 / (100 - sales.discount::FLOAT)
 		END::NUMERIC(9,2) as price,
 		sales.price::NUMERIC(9,2) AS discounted_price,
 		sales.discount AS discount,
@@ -117,31 +117,15 @@ CREATE TABLE car_shop.cars (
 	gasoline_consumption NUMERIC(3, 1) DEFAULT 0.0 CHECK (gasoline_consumption >= 0.0) -- в исходной таблице это флоат, но такая точность избыточная. NULL меняю на 0
 );
 
--- какие машины есть в автосалоне
--- чтобы не продавались фантомные машины
-CREATE TABLE car_shop.stocks (
-	sku_id SMALLSERIAL PRIMARY KEY, -- автоинкремент
-	car_id SMALLINT REFERENCES car_shop.cars(id) ON DELETE CASCADE, -- связь с машинами
-	color_id SMALLINT REFERENCES car_shop.colors(id) ON DELETE CASCADE,
-	quantity SMALLINT DEFAULT 1 CHECK (quantity >= 0.0), -- доступное количество, 1 тк при добавлении явно есть в наличии
-	price NUMERIC(9,2) NOT NULL CHECK (price >= 0.0)
-);
-
 -- таблица продаж
 -- один клиент может покупать в разные дни
 -- либо купить несколько машин в один день
 CREATE TABLE car_shop.sales (
 	id SERIAL PRIMARY KEY,--мб много
 	client_id SMALLINT REFERENCES car_shop.clients(id) ON DELETE CASCADE,
+	car_id SMALLINT REFERENCES car_shop.cars(id) ON DELETE CASCADE, -- связь с машинами
+	color_id SMALLINT REFERENCES car_shop.colors(id) ON DELETE CASCADE,
 	date DATE DEFAULT CURRENT_DATE,
-	total NUMERIC(9,2) NOT NULL CHECK (total > 0.0) -- цена всего инвойса
-);
-
--- принадлежит продаже
-CREATE TABLE car_shop.sale_line (
-	id SERIAL PRIMARY KEY,
-	sku_id SMALLINT REFERENCES car_shop.stocks(sku_id) ON DELETE CASCADE,
-	sale_id INTEGER REFERENCES car_shop.sales(id) ON DELETE CASCADE,
 	car_price NUMERIC(9,2) NOT NULL CHECK (car_price > 0.0), -- цена за единицу
 	discount SMALLINT DEFAULT 0 CHECK (discount >= 0),-- скидка на машину
 	discounted_price DECIMAL(9,2) DEFAULT 0 CHECK (discounted_price <= car_price) -- цена со скидкой
@@ -204,63 +188,38 @@ INSERT INTO car_shop.cars (
 					FROM raw_data.splitted_sales AS raw) AS cars
 	ON b.name = cars.brand;
 
--- заполняю стоки
-INSERT INTO car_shop.stocks (
-	car_id,
-	color_id,
-	price
-) SELECT
-		cars.id AS car_id,
-		colors.id AS color_id,
-		raw_stocks.price AS price
-	FROM
-		(SELECT 
-				DISTINCT raw.auto AS name,
-				rs.car_brand AS brand,
-				rs.car_model AS model,
-				rs.car_color AS color,
-				rs.price AS price
-			FROM raw_data.sales AS raw
-			JOIN raw_data.splitted_sales AS rs ON raw.id = rs.id) AS raw_stocks
-	JOIN car_shop.colors AS colors ON colors.name = raw_stocks.color
-	JOIN car_shop.brands AS brands ON brands.name = raw_stocks.brand
-	JOIN car_shop.cars AS cars ON cars.name = raw_stocks.model AND cars.brand_id = brands.id;
-
--- заполняю таблицы продаж
+-- заполняю продажи
 INSERT INTO car_shop.sales (
 	client_id,
+	car_id,
+	color_id,
 	date,
-	total
-) SELECT
-		clients.id AS client_id,
-		raw.sale_date AS date,
-		raw.discounted_price AS price
-	FROM
-		raw_data.splitted_sales AS raw
-	JOIN car_shop.clients AS clients ON clients.phone = raw.phone
-	ORDER BY date;
-	
--- заполняю таблицу элементы продаж
-INSERT INTO car_shop.sale_line (
-	sku_id,
-	sale_id,
 	car_price,
 	discount,
 	discounted_price
 ) SELECT
-		stocks.sku_id as sku_id,
-		sales.id AS sale_id,
-		old_sales.price as car_price,
-		old_sales.discount as discount,
-		old_sales.discounted_price as discounted_price
-	FROM raw_data.splitted_sales AS old_sales
-	JOIN car_shop.brands AS brands ON brands.name = old_sales.car_brand
-	JOIN car_shop.cars AS cars ON cars.name = old_sales.car_model and cars.brand_id = brands.id
-	JOIN car_shop.colors AS colors ON colors.name = old_sales.car_color
-	JOIN car_shop.clients AS clients ON clients.phone = old_sales.phone
-	JOIN car_shop.sales AS sales ON sales.client_id = clients.id and old_sales.sale_date = sales.date
-	JOIN car_shop.stocks AS stocks ON stocks.color_id = colors.id and stocks.car_id = cars.id and stocks.price = old_sales.price
-	ORDER BY old_sales.sale_date;
+		clients.id As client_id,
+		cars.id AS car_id,
+		colors.id AS color_id,
+		raw_stocks.date AS date,
+		raw_stocks.price AS car_price,
+		raw_stocks.discount AS discount,
+		raw_stocks.discounted_price AS discounted_price
+	FROM
+		(SELECT 
+				rs.car_brand AS brand,
+				rs.car_model AS model,
+				rs.car_color AS color,
+				rs.price AS price,
+		 		rs.discount AS discount,
+		 		rs.discounted_price AS discounted_price,
+		 		rs.phone AS phone,
+		 		rs.sale_date AS date
+			FROM raw_data.splitted_sales AS rs) AS raw_stocks
+	JOIN car_shop.clients AS clients ON clients.phone = raw_stocks.phone
+	JOIN car_shop.colors AS colors ON colors.name = raw_stocks.color
+	JOIN car_shop.brands AS brands ON brands.name = raw_stocks.brand
+	JOIN car_shop.cars AS cars ON cars.name = raw_stocks.model AND cars.brand_id = brands.id;
 	
 -- задача 1
 SELECT COUNT(*) AS nulls_percentage_gasoline_consumption FROM raw_data.sales AS raw
@@ -270,12 +229,10 @@ WHERE raw.gasoline_consumption IS NULL;
 SELECT 
 	brands.name AS brand_name,
 	years AS year,
-	AVG(line.car_price)::NUMERIC(9,2) AS price_avg -- не знаю тут надо было со скидкой или без скидки
+	AVG(sales.car_price)::NUMERIC(9,2) AS price_avg -- не знаю тут надо было со скидкой или без скидки
 FROM generate_series(2015, 2022, 1) AS years
 JOIN car_shop.sales AS sales ON EXTRACT(YEAR FROM sales.date) = years
-JOIN car_shop.sale_line AS line ON sales.id = line.sale_id
-JOIN car_shop.stocks AS stocks ON stocks.sku_id = line.sku_id
-JOIN car_shop.cars AS cars ON cars.id = stocks.car_id
+JOIN car_shop.cars AS cars ON cars.id = sales.car_id
 JOIN car_shop.brands AS brands ON brands.id = cars.brand_id
 GROUP BY years, brands.name
 ORDER BY brand_name ASC, year ASC;
@@ -285,12 +242,11 @@ SELECT
 	EXTRACT(MONTH FROM dates.date) AS month,
 	EXTRACT(YEAR FROM dates.date) AS year,
 	CASE
-		WHEN AVG(line.car_price) IS NULL THEN 0.0
-		ELSE AVG(line.car_price)::NUMERIC(9,2)
+		WHEN AVG(sales.car_price) IS NULL THEN 0.0
+		ELSE AVG(sales.car_price)::NUMERIC(9,2)
 	END AS price_avg
 FROM (select GENERATE_SERIES('2022-01-01'::date, '2022-12-01'::date, '1 month')::date AS date) AS dates
-LEFT JOIN car_shop.sales AS sales ON DATE_TRUNC('day', sales.date)::DATE = dates.date
-LEFT JOIN car_shop.sale_line AS line ON sales.id = line.sale_id
+LEFT JOIN car_shop.sales AS sales ON DATE_TRUNC('month', sales.date)::DATE = dates.date -- тут была ошибка надо было month. Думал, что если day то обнуляет дни ))
 GROUP BY month, year
 ORDER BY month ASC;
 
@@ -299,10 +255,8 @@ SELECT
 	(clients.first_name || ' ' || clients.last_name) AS person,
 	STRING_AGG(CONCAT_WS(', ', cars.name, brands.name), ', ') AS cars
 FROM car_shop.sales AS sales
-JOIN car_shop.sale_line AS line ON line.sale_id = sales.id
 JOIN car_shop.clients AS clients ON clients.id = sales.client_id
-JOIN car_shop.stocks AS stocks ON stocks.sku_id = line.sku_id
-JOIN car_shop.cars AS cars ON cars.id = stocks.car_id
+JOIN car_shop.cars AS cars ON cars.id = sales.car_id
 JOIN car_shop.brands AS brands ON brands.id = cars.brand_id
 GROUP BY person
 ORDER BY person ASC;
@@ -310,11 +264,11 @@ ORDER BY person ASC;
 -- задача 5
 SELECT
 	countries.name AS brand_origin,
-	MAX(stocks.price) AS price_max,
-	MIN(stocks.price) AS price_min
+	MAX(sales.car_price) AS price_max,
+	MIN(sales.car_price) AS price_min
 FROM
-	car_shop.stocks AS stocks
-JOIN car_shop.cars AS cars ON cars.id = stocks.car_id
+	car_shop.sales AS sales
+JOIN car_shop.cars AS cars ON cars.id = sales.car_id
 JOIN car_shop.brands AS brands ON brands.id = cars.brand_id
 JOIN car_shop.countries AS countries ON countries.id = brands.country_id
 GROUP BY brand_origin;
