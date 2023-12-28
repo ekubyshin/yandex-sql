@@ -50,7 +50,7 @@ LANGUAGE plpgsql
 		
 			SELECT * FROM projects INTO _cur_p WHERE id = p_id;
 			IF _cur_p.is_active = false THEN
-				RAISE NOTICE 'Проект уже закрыт'; RETURN;
+				RAISE EXCEPTION 'Project already closed'; RETURN;
 			END IF;
 			UPDATE projects 
 				SET is_active = false 
@@ -67,11 +67,14 @@ LANGUAGE plpgsql
 			_bonus := FLOOR(_diff * 0.75 / _load.workers_count);
 			IF _bonus > 16 THEN _bonus := 16; END IF;
 			IF _bonus > 0 THEN
-				FOR _e IN SELECT DISTINCT employee_id FROM logs WHERE project_id = p_id
-					LOOP
-						INSERT INTO logs(employee_id, project_id, work_date, work_hours)
-						VALUES (_e, p_id, current_date, _bonus);
-					END LOOP;
+				INSERT INTO logs(employee_id, project_id, work_date, work_hours)
+				SELECT 
+					DISTINCT l.employee_id, 
+					p_id, 
+					current_date, 
+					_bonus  
+				FROM logs l 
+				WHERE l.project_id = p_id;
 			END IF;
 	END;
     $$;
@@ -86,7 +89,7 @@ LANGUAGE plpgsql
 	_required_review BOOLEAN := false;
 	BEGIN
 		SELECT * INTO _cur_p FROM projects WHERE id = p_proj;
-        IF _cur_p.is_active = false THEN RAISE EXCEPTION 'Project Closed'; RETURN; END IF;
+        IF _cur_p.is_active = false THEN RAISE EXCEPTION 'Project already closed'; RETURN; END IF;
 		IF p_hours < 1 OR p_hours > 24 THEN RAISE EXCEPTION 'Invalid hours'; RETURN; END IF;
 		IF p_hours > 16 THEN _required_review := true; END IF;
 		IF p_date > current_date THEN _required_review := true; END IF;
